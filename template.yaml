@@ -4,7 +4,7 @@ Transform: AWS::Serverless-2016-10-31
 Parameters:
   FrontendOrigin:
     Type: String
-    Default: http://localhost:5173
+    Default: https://prod.d2plnd4uug2rvj.amplifyapp.com
     Description: Frontend origin for CORS
 
 Globals:
