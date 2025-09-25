@@ -1,0 +1,277 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  FrontendOrigin:
+    Type: String
+    Default: http://localhost:5173
+    Description: Frontend origin for CORS
+
+Globals:
+  Function:
+    Timeout: 30
+    Runtime: java21
+    MemorySize: 512
+    Environment:
+      Variables:
+        TASKS_TABLE: !Ref TasksTable
+        SNS_TOPIC_ARN: !Ref TaskNotificationsTopic
+        SQS_QUEUE_URL: !Ref TaskExpiryQueue
+
+Resources:
+  # DynamoDB Table
+  TasksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: TodoTasks
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: taskId
+          AttributeType: S
+        - AttributeName: deadline
+          AttributeType: N
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+        - AttributeName: taskId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: DeadlineIndex
+          KeySchema:
+            - AttributeName: deadline
+              KeyType: HASH
+            - AttributeName: taskId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+
+  # Cognito User Pool
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: TodoUserPool
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: TodoWebClient
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      # PreventUserExistenceErrors: ENABLED
+
+  # SNS Topic for notifications
+  TaskNotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: TaskNotifications
+
+  # SQS FIFO Queue for expiry events
+  TaskExpiryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: TaskExpiryQueue.fifo
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+  # Lambda Functions
+  PostAuthenticationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.todoapp.handlers.AuthHandler::handleRequest
+      CodeUri: todo-api
+      Events:
+        CognitoEvent:
+          Type: Cognito
+          Properties:
+            UserPool: !Ref UserPool
+            Trigger: PostAuthentication
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sns:Subscribe
+              Resource: !Ref TaskNotificationsTopic
+
+  CreateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.todoapp.handlers.TaskHandler::createTask
+      CodeUri: todo-api
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: post
+            RestApiId: !Ref TodoApi
+            Auth:  
+              Authorizer: CognitoAuth
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+              Resource: !GetAtt TasksTable.Arn
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt TaskExpiryQueue.Arn
+
+  GetTasksFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.todoapp.handlers.TaskHandler::getTasks
+      CodeUri: todo-api
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /tasks
+            Method: get
+            RestApiId: !Ref TodoApi
+            Auth:  
+              Authorizer: CognitoAuth
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+              Resource: !GetAtt TasksTable.Arn
+
+  UpdateTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.todoapp.handlers.TaskHandler::updateTask
+      CodeUri: todo-api
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: put
+            RestApiId: !Ref TodoApi
+            Auth:  
+              Authorizer: CognitoAuth
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:UpdateItem
+                - dynamodb:GetItem
+              Resource: !GetAtt TasksTable.Arn
+
+  DeleteTaskFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.todoapp.handlers.TaskHandler::deleteTask
+      CodeUri: todo-api
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /tasks/{taskId}
+            Method: delete
+            RestApiId: !Ref TodoApi
+            Auth:  
+              Authorizer: CognitoAuth
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:DeleteItem
+                - dynamodb:GetItem
+              Resource: !GetAtt TasksTable.Arn
+
+  StreamProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.todoapp.handlers.ExpiryHandler::processStream
+      CodeUri: todo-api
+      Events:
+        DynamoDBEvent:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt TasksTable.StreamArn
+            BatchSize: 10
+            StartingPosition: LATEST
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt TaskExpiryQueue.Arn
+
+
+  ExpiryHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: com.todoapp.handlers.ExpiryHandler::handleExpiry
+      CodeUri: todo-api
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt TaskExpiryQueue.Arn
+            BatchSize: 1
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt TasksTable.Arn
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: '*'
+
+
+  # API Gateway
+  TodoApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Auth:
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !GetAtt UserPool.Arn
+            Identity:
+              Header: Authorization
+        AddDefaultAuthorizerToCorsPreflight: false
+      Cors:
+        AllowMethods: "'GET,POST,PUT,DELETE,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token, X-Requested-With'"
+        AllowOrigin: !Sub "'${FrontendOrigin}'"
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${TodoApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  UserPoolId:
+    Description: "Cognito User Pool ID"
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: "Cognito User Pool Client ID"
+    Value: !Ref UserPoolClient
