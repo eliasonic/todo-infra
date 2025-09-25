@@ -19,7 +19,6 @@ region = "eu-central-1"
 disable_rollback = true
 image_repositories = []
 stack_name = "todo-infra-stack"
-parameter_overrides = "FrontendOrigin=\"https://prod.d2plnd4uug2rvj.amplifyapp.com\""
 
 [default.sync.parameters]
 watch = true

@@ -15,6 +15,7 @@ env:
   PROD_CLOUDFORMATION_EXECUTION_ROLE: ${{ vars.PROD_CLOUDFORMATION_EXECUTION_ROLE }} 
   PROD_ARTIFACTS_BUCKET: ${{ vars.PROD_ARTIFACTS_BUCKET }}
   PROD_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+  FRONTEND_ORIGIN: ${{ vars.FRONTEND_ORIGIN }}
 
 permissions:
   id-token: write
@@ -92,4 +93,5 @@ jobs:
             --region ${PROD_REGION} \
             --s3-bucket ${PROD_ARTIFACTS_BUCKET} \
             --no-fail-on-empty-changeset \
-            --role-arn ${PROD_CLOUDFORMATION_EXECUTION_ROLE}
+            --role-arn ${PROD_CLOUDFORMATION_EXECUTION_ROLE} \
+            --parameter-overrides FrontendOrigin=${FRONTEND_ORIGIN}
